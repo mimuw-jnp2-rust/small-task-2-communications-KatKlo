@@ -1,5 +1,12 @@
 use std::collections::HashMap;
 
+use crate::CommsError::{
+    ConnectionClosed, ConnectionExists, ConnectionNotFound, ServerLimitReached, UnexpectedHandshake,
+};
+use crate::Connection::{Closed, Open};
+use crate::MessageType::{GetCount, Handshake, Post};
+use crate::Response::{HandshakeReceived, PostReceived};
+
 type CommsResult<T> = Result<T, CommsError>;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,7 +28,11 @@ enum MessageType {
 
 impl MessageType {
     fn header(&self) -> &'static str {
-        todo!()
+        match self {
+            Handshake => "[HANDSHAKE]",
+            Post => "[POST]",
+            GetCount => "[GET COUNT]",
+        }
     }
 }
 
@@ -69,7 +80,21 @@ impl Client {
     // Method should return an error when a connection already exists.
     // The client should send a handshake to the server.
     fn open(&mut self, addr: &str, server: Server) -> CommsResult<()> {
-        todo!()
+        if self.is_open(addr) {
+            return Err(ConnectionExists(String::from(addr)));
+        }
+
+        self.connections
+            .insert(String::from(addr), Connection::Open(server));
+
+        self.send(
+            addr,
+            Message {
+                msg_type: Handshake,
+                load: self.ip.clone(),
+            },
+        )
+        .and(Ok(()))
     }
 
     // Sends the provided message to the server at the given `addr`.
@@ -77,21 +102,43 @@ impl Client {
     // responds with a ServerLimitReached error, its corresponding connection
     // should be closed.
     fn send(&mut self, addr: &str, msg: Message) -> CommsResult<Response> {
-        // server.receive(msg)
-        todo!()
+        match self
+            .connections
+            .get_mut(addr)
+            .ok_or_else(|| ConnectionNotFound(String::from(addr)))?
+        {
+            Open(server) => {
+                let response = server.receive(msg);
+
+                if let Err(ServerLimitReached(_)) = response {
+                    if let Some(c) = self.connections.get_mut(addr) {
+                        *c = Closed;
+                    }
+                };
+
+                response
+            }
+            Closed => Err(ConnectionClosed(String::from(addr))),
+        }
     }
 
     // Returns whether the connection to `addr` exists and has
     // the `Open` status.
     #[allow(dead_code)]
     fn is_open(&self, addr: &str) -> bool {
-        todo!()
+        match self.connections.get(addr).unwrap_or(&Closed) {
+            Open(_) => true,
+            Closed => false,
+        }
     }
 
     // Returns the number of closed connections
     #[allow(dead_code)]
     fn count_closed(&self) -> usize {
-        todo!()
+        self.connections
+            .iter()
+            .filter(|(_, c)| matches!(c, Closed))
+            .count()
     }
 }
 
@@ -101,7 +148,6 @@ enum Response {
     PostReceived,
     GetCount(u32),
 }
-
 
 #[derive(Clone)]
 struct Server {
@@ -113,7 +159,12 @@ struct Server {
 
 impl Server {
     fn new(name: String, limit: u32) -> Server {
-        todo!()
+        Server {
+            name,
+            post_count: 0,
+            limit,
+            connected_client: None,
+        }
     }
 
     // Consumes the message.
@@ -124,7 +175,24 @@ impl Server {
     fn receive(&mut self, msg: Message) -> CommsResult<Response> {
         eprintln!("{} received:\n{}", self.name, msg.content());
 
-        todo!()
+        match msg.msg_type {
+            Post => {
+                if self.post_count >= self.limit {
+                    Err(ServerLimitReached(self.name.clone()))
+                } else {
+                    self.post_count += 1;
+                    Ok(PostReceived)
+                }
+            }
+            Handshake => match self.connected_client {
+                None => {
+                    self.connected_client = Some(msg.load);
+                    Ok(HandshakeReceived)
+                }
+                Some(_) => Err(UnexpectedHandshake(self.name.clone())),
+            },
+            GetCount => Ok(Response::GetCount(self.post_count)),
+        }
     }
 }
 
